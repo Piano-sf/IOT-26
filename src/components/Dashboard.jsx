@@ -7,8 +7,29 @@ import { motion, AnimatePresence } from "framer-motion";
 import {
   Thermometer, Droplets, Wind, Activity, AlertTriangle,
   CheckCircle, Clock, Zap, Cat, Heart, Bell, Wifi,
-  TrendingUp, Shield, X, ChevronRight, Circle, Calendar
+  TrendingUp, Shield, X, ChevronRight, Circle, Calendar, Bot
 } from "lucide-react";
+import VetChatbot from "../VetChatbot";
+
+// 🔥 1. นำเข้า Firebase และ Gemini
+import { initializeApp } from "firebase/app";
+import { getDatabase, ref, onValue } from "firebase/database";
+import { GoogleGenerativeAI } from "@google/generative-ai";
+
+// 🔥 2. ตั้งค่า API Keys
+const firebaseConfig = {
+  apiKey: "AIzaSyA_KKpyVdOsWrr_odPUWVe9QaUzN-1if7A",
+  databaseURL: "https://pawsitive-care-iot-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "pawsitive-care-iot",
+};
+
+// Initialize Firebase
+const app = initializeApp(firebaseConfig);
+const db = getDatabase(app);
+
+// Initialize Gemini
+const genAI = new GoogleGenerativeAI("AIzaSyBL4aG8mciMioQ0TLTwNA5okRcQdKs6fpk"); 
+const aiModel = genAI.getGenerativeModel({ model: "gemini-3-flash-preview" });
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 const uid = () => Math.random().toString(36).slice(2, 9);
@@ -30,18 +51,7 @@ function healthStatus(duration, freq) {
   return { label: "Normal", color: "#10b981", icon: "✅" };
 }
 
-// ── Seed Data ───────────────────────────────────────────────────────────────
-const seedVisits = () => {
-  const base = new Date();
-  base.setHours(6, 0, 0, 0);
-  return Array.from({ length: 7 }, (_, i) => {
-    const t = new Date(base.getTime() + i * 110 * 60 * 1000);
-    const duration = +(1 + Math.random() * 2).toFixed(1); // เริ่มต้นแบบ Normal ให้กราฟไม่แดงเถือก
-    return { id: uid(), time: fmtShort(t), duration, raw: t };
-  });
-};
-
-// ข้อมูลจำลองรายสัปดาห์ (โชว์เทรนด์พฤติกรรมเสี่ยงโรคนิ่ว)
+// ── Seed Data (Weekly Stats คงไว้โชว์เทรนด์) ──────────────────────────
 const seedWeeklyStats = [
   { id: 'w1', date: "27 Mar", visitCount: 3, duration: 2.5, riskScore: 10 },
   { id: 'w2', date: "28 Mar", visitCount: 4, duration: 2.8, riskScore: 15 },
@@ -54,8 +64,7 @@ const seedWeeklyStats = [
 
 const seedNotifications = () => [
   { id: uid(), type: "info", msg: "System online — all sensors nominal", ts: new Date() },
-  { id: uid(), type: "warn", msg: "Ammonia elevated: 0.18 ppm — fan activated", ts: new Date(Date.now() - 4 * 60000) },
-  { id: uid(), type: "ok",   msg: "Visit #3 completed — Normal duration (2.4 min)", ts: new Date(Date.now() - 9 * 60000) },
+  { id: uid(), type: "ok",   msg: "Firebase RTDB Connected Successfully", ts: new Date() },
 ];
 
 // ── Sub-components ──────────────────────────────────────────────────────────
@@ -290,65 +299,105 @@ function CustomTooltip({ active, payload, viewMode }) {
 
 // ── Main Dashboard ──────────────────────────────────────────────────────────
 export default function Dashboard() {
-  const [viewMode,  setViewMode]  = useState("today"); // "today" | "weekly"
-  const [visits,    setVisits]    = useState(seedVisits);
+  const [viewMode,  setViewMode]  = useState("today");
+  // 🔥 เปลี่ยนเริ่มต้นเป็น Array ว่าง เพื่อให้กราฟโล่งก่อนเริ่มการทำงาน
+  const [visits,    setVisits]    = useState([]);
   const [notifs,    setNotifs]    = useState(seedNotifications);
   const [selected,  setSelected]  = useState(null);
-  const [sensors,   setSensors]   = useState({ temp: 24.3, hum: 58, air: 90, ammonia: 0.08, fan: false, spray: false });
-  const [ticker,    setTicker]    = useState(0);
+  
+  // 🔥 State สำหรับเก็บข้อมูลจากเซนเซอร์จริงๆ
+  const [sensors,   setSensors]   = useState({ temp: 0, hum: 0, air: 100, ammonia: 0, fan: false, spray: false });
   const notifRef = useRef(null);
+  const prevStateRef = useRef(0);
+
+  // 🔥 State สำหรับ AI Analyst Report
+  const [report, setReport] = useState(null);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
 
   const pushNotif = useCallback((type, msg) => {
     setNotifs((prev) => [{ id: uid(), type, msg, ts: new Date() }, ...prev].slice(0, 40));
   }, []);
 
-  // ── Simulate IoT data ───────────────────────────────────────────────────
-  const simulateNewIoTData = useCallback(() => {
-    // โอกาสเกิดวิกฤต (ทะลุ 5 นาที) เพื่อโชว์ Real-time alert
-    const isCrisis = Math.random() < 0.2; 
-    const duration  = isCrisis ? +(5.5 + Math.random() * 3).toFixed(1) : +(0.5 + Math.random() * 3).toFixed(1);
-    const now       = new Date();
-    const newVisit  = { id: uid(), time: fmtShort(now), duration, raw: now };
+  // ดึงข้อมูลจาก Firebase แบบ Real-time
+  useEffect(() => {
+    const liveStatusRef = ref(db, 'litter_box/live_status');
+    
+    const unsubscribe = onValue(liveStatusRef, (snapshot) => {
+      const data = snapshot.val();
+      if (data) {
+        const simAmmonia = data.mq135_raw ? (data.mq135_raw / 10000) : 0;
+        const airPurity = Math.max(0, Math.min(100, 100 - (simAmmonia * 300))); 
 
-    setVisits((prev) => [...prev.slice(-11), newVisit]);
+        setSensors({
+          temp: data.temperature || 0,
+          hum: data.humidity || 0,
+          air: Math.round(airPurity),
+          ammonia: simAmmonia,
+          fan: data.fan_status || false,
+          spray: data.rain_detected === 1
+        });
 
-    // Sensor fluctuation
-    setSensors((s) => {
-      const ammonia  = +(s.ammonia + (Math.random() * 0.08 - 0.02)).toFixed(2);
-      const fan      = ammonia > 0.15;
-      const spray    = Math.random() < 0.15;
-      const temp     = +(s.temp + (Math.random() * 0.4 - 0.2)).toFixed(1);
-      const hum      = Math.min(85, Math.max(35, +(s.hum + (Math.random() * 2 - 1)).toFixed(0)));
-      const air      = Math.min(99, Math.max(40, +(s.air + (Math.random() * 4 - 2)).toFixed(0)));
-      return { temp, hum, air, ammonia, fan, spray };
+        const currentState = data.system_state || 0;
+        if (currentState !== prevStateRef.current) {
+          if (currentState === 2) {
+            pushNotif("error", "💧 ALERT: Liquid detected on floor sensor (Possible spray/accident)!");
+          } else if (currentState === 1) {
+            pushNotif("warn", `🌫️ Ammonia spike detected. Push-pull fans activated.`);
+          } else if (currentState === 0 && prevStateRef.current === 1) {
+            pushNotif("ok", "✅ Air quality restored to normal. Fans standby.");
+          }
+          prevStateRef.current = currentState;
+        }
+      }
     });
 
-    setSensors((s) => {
-      // Notification logic
-      if (duration > 5) pushNotif("error", `🚨 CRITICAL: Prolonged visit detected — ${duration} min!`);
-      else if (duration > 3) pushNotif("warn", `⚠️ Visit slightly extended — ${duration} min`);
-      else pushNotif("ok", `✅ Visit completed — ${duration} min (Normal)`);
-
-      if (s.ammonia > 0.15) pushNotif("warn", `🌫️ Ammonia spike detected: ${s.ammonia.toFixed(2)} ppm — fan activated`);
-      if (s.spray) pushNotif("error", "💧 ALERT: Rain-sensor triggered (Possible out-of-box urination)");
-      return s;
-    });
-
-    setTicker((t) => t + 1);
+    return () => unsubscribe();
   }, [pushNotif]);
 
-  // Auto-simulate every 8 s
-  useEffect(() => {
-    const id = setInterval(simulateNewIoTData, 8000);
-    return () => clearInterval(id);
-  }, [simulateNewIoTData]);
+  // ฟังก์ชันกดปุ่มสร้างรายงานด้วย Gemini AI
+  const generateAIReport = async () => {
+    setIsAnalyzing(true);
+    try {
+      // 🔥 ป้องกัน Error NaN กรณีไม่มีข้อมูล
+      const avgDuration = visits.length > 0 ? (visits.reduce((a, v) => a + v.duration, 0) / visits.length).toFixed(1) : "0.0";
+      const maxDuration = visits.length > 0 ? Math.max(...visits.map(v => v.duration)).toFixed(1) : "0.0";
+      
+      const prompt = `
+        คุณคือสัตวแพทย์ AI วิเคราะห์ข้อมูลจากกระบะทรายอัจฉริยะของวันนี้:
+        - จำนวนการเข้าห้องน้ำ: ${visits.length} ครั้ง
+        - เวลาเฉลี่ยต่อครั้ง: ${avgDuration} นาที
+        - ครั้งที่นานที่สุด: ${maxDuration} นาที
+        - ก๊าซแอมโมเนียเฉลี่ย: ${sensors.ammonia.toFixed(2)} ppm
+        - อุณหภูมิ/ความชื้น: ${sensors.temp}C / ${sensors.hum}%
+
+        ช่วยเขียนรายงานสรุปสุขภาพแมว 3 ข้อสั้นๆ: 
+        1. ภาพรวมพฤติกรรมวันนี้ 
+        2. ความเสี่ยงโรคนิ่วหรือกระเพาะปัสสาวะ 
+        3. คำแนะนำสำหรับเจ้าของ
+      `;
+
+      const result = await aiModel.generateContent(prompt);
+      setReport(result.response.text());
+    } catch (error) {
+      console.error(error);
+      setReport("⚠️ ไม่สามารถวิเคราะห์ข้อมูลได้ในขณะนี้ (เซิร์ฟเวอร์ AI อาจจะทำงานหนัก) กรุณาลองใหม่");
+    }
+    setIsAnalyzing(false);
+  };
+
+  const triggerManualAlert = useCallback(() => {
+    const duration  = +(5.5 + Math.random() * 3).toFixed(1);
+    const now       = new Date();
+    const newVisit  = { id: uid(), time: fmtShort(now), duration, raw: now };
+    setVisits((prev) => [...prev.slice(-11), newVisit]);
+    pushNotif("error", `🚨 CRITICAL: Prolonged visit detected — ${duration} min! AI analysis suggests UTI screening.`);
+  }, [pushNotif]);
 
   const freq      = visits.length;
   const lastVisit = visits[visits.length - 1];
   const uti       = lastVisit?.duration > 5 && freq >= 5;
   const kidney    = freq >= 6;
 
-  // กำหนดข้อมูลที่จะแสดงตาม View Mode
   const chartData = viewMode === "today" ? visits : seedWeeklyStats;
   const xDataKey = viewMode === "today" ? "time" : "date";
 
@@ -370,15 +419,15 @@ export default function Dashboard() {
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-emerald-500/10 border border-emerald-500/20">
             <Wifi size={11} className="text-emerald-400" />
-            <span className="text-[11px] text-emerald-400 font-medium">CLOUD SYNC</span>
+            <span className="text-[11px] text-emerald-400 font-medium">LIVE CLOUD SYNC</span>
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
           </div>
           <button
-            onClick={simulateNewIoTData}
+            onClick={triggerManualAlert}
             className="flex items-center gap-2 px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 transition-colors text-slate-900 text-xs font-bold"
           >
             <Zap size={13} />
-            Simulate Alert
+            Test AI Alert
           </button>
         </div>
       </header>
@@ -394,9 +443,9 @@ export default function Dashboard() {
           </div>
 
           <div className="grid grid-cols-2 gap-3">
-            <SensorCard icon={Thermometer} label="Temperature" value={sensors.temp} unit="°C"
-              accent="#f97316" sub={sensors.temp > 28 ? "⚠️ Elevated" : "Normal range"} />
-            <SensorCard icon={Droplets} label="Humidity" value={sensors.hum} unit="%"
+            <SensorCard icon={Thermometer} label="Temperature" value={sensors.temp.toFixed(1)} unit="°C"
+              accent="#f97316" sub={sensors.temp > 30 ? "⚠️ Elevated" : "Normal range"} />
+            <SensorCard icon={Droplets} label="Humidity" value={sensors.hum.toFixed(0)} unit="%"
               accent="#38bdf8" sub={sensors.hum > 75 ? "⚠️ High moisture" : "Comfortable"} />
           </div>
           <AirPurityBar pct={sensors.air} />
@@ -426,7 +475,7 @@ export default function Dashboard() {
           <DiagnosticsConsole fanActive={sensors.fan} sprayActive={sensors.spray} ammonia={sensors.ammonia} />
         </Card>
 
-        {/* ──────────── MIDDLE: Trends (Hybrid) ──────────── */}
+        {/* ──────────── MIDDLE: Trends & AI Analyst ──────────── */}
         <Card className="flex flex-col p-6 gap-5">
           <div className="flex items-center justify-between mb-1">
             <div className="flex items-center gap-2">
@@ -461,7 +510,7 @@ export default function Dashboard() {
             ))}
           </div>
 
-          <div className="flex-1 min-h-[240px]">
+          <div className="flex-1 min-h-[200px]">
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={chartData} barCategoryGap="30%"
                 onClick={(d) => d?.activePayload && setSelected(d.activePayload[0].payload)}>
@@ -478,21 +527,12 @@ export default function Dashboard() {
             </ResponsiveContainer>
           </div>
 
-          {/* Threshold note */}
-          <div className={`flex items-center gap-2 px-3 py-2.5 rounded-xl border transition-colors ${viewMode === 'weekly' ? 'bg-orange-500/10 border-orange-500/20' : 'bg-red-500/8 border-red-500/20'}`}>
-            <AlertTriangle size={12} className={viewMode === 'weekly' ? 'text-orange-400 shrink-0' : 'text-red-400 shrink-0'} />
-            <p className="text-[11px] text-slate-400">
-              {viewMode === "weekly" 
-                ? <><span className="text-orange-400 font-medium">Weekly Insights:</span> Notice the upward trend in duration and frequency starting Mar 30. High risk of FLUTD.</>
-                : <>Bars <span className="text-red-400 font-medium">exceeding 5 min</span> indicate elevated UTI risk. <span className="text-slate-500">Tap for details.</span></>}
-            </p>
-          </div>
-
           {/* Dynamic Stats row */}
           <div className="grid grid-cols-3 gap-2.5">
             {[
-              [viewMode === "today" ? "Avg Duration" : "Weekly Avg", `${(chartData.reduce((a,v)=>a+v.duration,0)/chartData.length).toFixed(1)} min`, "#10b981"],
-              [viewMode === "today" ? "Max Duration" : "Peak Risk", viewMode === "today" ? `${Math.max(...chartData.map(v=>v.duration)).toFixed(1)} min` : "95%", "#ef4444"],
+              // 🔥 ป้องกัน Error NaN และจัดฟอร์แมตตัวเลขใหม่ให้สมูทตอนเริ่มต้น
+              [viewMode === "today" ? "Avg Duration" : "Weekly Avg", chartData.length > 0 ? `${(chartData.reduce((a,v)=>a+v.duration,0)/chartData.length).toFixed(1)} min` : "0.0 min", "#10b981"],
+              [viewMode === "today" ? "Max Duration" : "Peak Risk", viewMode === "today" ? (chartData.length > 0 ? `${Math.max(...chartData.map(v=>v.duration)).toFixed(1)} min` : "0.0 min") : "95%", "#ef4444"],
               [viewMode === "today" ? "Total Visits" : "Total Weekly",  viewMode === "today" ? `${chartData.length}` : `${chartData.reduce((a,v)=>a+v.visitCount,0)}`, "#38bdf8"],
             ].map(([l,v,c]) => (
               <div key={l} className="bg-slate-900/60 rounded-2xl p-3 text-center">
@@ -500,6 +540,28 @@ export default function Dashboard() {
                 <p className="text-sm font-bold" style={{ color: c }}>{v}</p>
               </div>
             ))}
+          </div>
+
+          {/* 🔥 AI Report Generator Box 🔥 */}
+          <div className="mt-2 p-4 bg-slate-900/80 border border-emerald-500/30 rounded-2xl">
+            <div className="flex justify-between items-center mb-3">
+              <h3 className="text-sm font-bold text-emerald-400 flex items-center gap-2">
+                <Bot size={16} /> AI Health Analysis
+              </h3>
+              <button 
+                onClick={generateAIReport}
+                disabled={isAnalyzing}
+                className="px-3 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-slate-900 text-xs font-bold rounded-lg transition-colors disabled:opacity-50"
+              >
+                {isAnalyzing ? "Analyzing Data..." : "Generate Report"}
+              </button>
+            </div>
+            
+            {report && (
+              <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 text-xs text-slate-300 whitespace-pre-line leading-relaxed">
+                {report}
+              </div>
+            )}
           </div>
         </Card>
 
@@ -573,6 +635,10 @@ export default function Dashboard() {
           <VisitModal visit={selected} freq={freq} onClose={() => setSelected(null)} />
         )}
       </AnimatePresence>
+
+      {/* 🔥 เอา AI Chatbot มาใส่ตรงนี้! */}
+      <VetChatbot sensors={sensors} lastVisit={lastVisit} />
+
     </div>
   );
 }
