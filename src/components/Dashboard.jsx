@@ -16,11 +16,11 @@ import { initializeApp } from "firebase/app";
 import { getDatabase, ref, onValue } from "firebase/database";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
-// 🔥 2. ตั้งค่า API Keys
+// 🔥 2. ตั้งค่า API Keys (อ่านจาก Environment Variables)
 const firebaseConfig = {
-  apiKey: "AIzaSyA_KKpyVdOsWrr_odPUWVe9QaUzN-1if7A",
-  databaseURL: "https://pawsitive-care-iot-default-rtdb.asia-southeast1.firebasedatabase.app",
-  projectId: "pawsitive-care-iot",
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "",
+  databaseURL: import.meta.env.VITE_FIREBASE_DATABASE_URL || "https://pawsitive-care-iot-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "pawsitive-care-iot",
 };
 
 // Initialize Firebase
@@ -28,7 +28,7 @@ const app = initializeApp(firebaseConfig);
 const db = getDatabase(app);
 
 // Initialize Gemini
-const genAI = new GoogleGenerativeAI("AIzaSyBL4aG8mciMioQ0TLTwNA5okRcQdKs6fpk"); 
+const genAI = new GoogleGenerativeAI(import.meta.env.VITE_GEMINI_API_KEY || ""); 
 const aiModel = genAI.getGenerativeModel({ model: "gemini-3-flash-preview" });
 
 // ── Helpers ────────────────────────────────────────────────────────────────

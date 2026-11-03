@@ -3,8 +3,8 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import { MessageCircle, X, Send, Bot, User } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
-// 🔥 1. ใส่ Gemini API Key ตรงนี้
-const genAI = new GoogleGenerativeAI("AIzaSyBL4aG8mciMioQ0TLTwNA5okRcQdKs6fpk");
+// 🔥 1. อ่าน Gemini API Key จาก Environment Variables
+const genAI = new GoogleGenerativeAI(import.meta.env.VITE_GEMINI_API_KEY || "");
 const model = genAI.getGenerativeModel({ model: "gemini-3-flash-preview" }); 
 
 export default function VetChatbot({ sensors, lastVisit }) {
